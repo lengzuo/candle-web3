@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "hermeneutic/pkg/proto/v1";
+
+// Candle represents an OHLC candle for a specific trading pair.
+message Candle {
+  string instrument_pair = 1; // e.g., "BTC-USDT"
+  google.protobuf.Timestamp timestamp = 2; // The start time of the candle interval.
+  string open = 3;
+  string high = 4;
+  string low = 5;
+  string close = 6;
+  string volume = 7;
+}
+
+// SubscribeCandlesRequest specifies the instrument pairs a client wants to subscribe to.
+message SubscribeCandlesRequest {
+  repeated string instrument_pairs = 1; // A list of pairs like ["BTC-USDT", "ETH-USDT"]
+}
+
+// CandlesService provides a real-time stream of OHLC candles.
+service CandlesService {
+  // SubscribeCandles opens a server-side stream to send candles to the client.
+  rpc SubscribeCandles(SubscribeCandlesRequest) returns (stream Candle) {}
+}

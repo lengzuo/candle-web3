@@ -1,0 +1,46 @@
+services:
+  # timescaledb:
+  # image: timescale/timescaledb:latest-pg14
+  # ports:
+  #   - "5432:5432"
+  # environment:
+  #   - POSTGRES_USER=user
+  #   - POSTGRES_PASSWORD=password
+  #   - POSTGRES_DB=candles
+  # volumes:
+  #   - timescaledb-data:/var/lib/postgresql/data
+  # networks:
+  # - candles-net
+
+  candles-service:
+    build:
+      context: .
+      dockerfile: candler-service/Dockerfile
+    ports:
+      - "8080:8080"
+    # depends_on:
+    #   - timescaledb
+    # environment:
+    #   - DB_HOST=timescaledb
+    #   - DB_PORT=5432
+    #   - DB_USER=user
+    #   - DB_PASSWORD=password
+    #   - DB_NAME=candles
+    networks:
+      - candles-net
+
+  client-service:
+    build:
+      context: .
+      dockerfile: client-service/Dockerfile
+    depends_on:
+      - candles-service
+      # - timescaledb
+    networks:
+      - candles-net
+
+networks:
+  candles-net:
+    driver: bridge
+# volumes:
+# timescaledb-data:
