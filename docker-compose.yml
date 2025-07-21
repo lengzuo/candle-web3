@@ -1,46 +1,83 @@
 services:
-  # timescaledb:
-  # image: timescale/timescaledb:latest-pg14
-  # ports:
-  #   - "5432:5432"
-  # environment:
-  #   - POSTGRES_USER=user
-  #   - POSTGRES_PASSWORD=password
-  #   - POSTGRES_DB=candles
-  # volumes:
-  #   - timescaledb-data:/var/lib/postgresql/data
-  # networks:
-  # - candles-net
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/bitnami/kafka/bin/kafka-topics.sh",
+          "--bootstrap-server",
+          "localhost:9092",
+          "--list",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    environment:
+      # --- KRaft settings ---
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      # A unique cluster ID is required for KRaft.
+      - KAFKA_CLUSTER_ID=your_generated_cluster_id
+
+      - KAFKA_CREATE_TOPICS=trades:12:3
+      - KAFKA_CFG_LISTENERS=INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - ALLOW_PLAINTEXT_LISTENER=yes
+
+    networks:
+      - candles-net
+
+  binance-connector:
+    build:
+      context: .
+      dockerfile: binance-connector/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - candles-net
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for kafka to be ready...'
+        while ! nc -z kafka 29092; do
+          sleep 1
+        done;
+        echo 'Kafka is ready, starting binance-connector...'
+        /binance-connector
+      "
 
   candles-service:
     build:
       context: .
       dockerfile: candler-service/Dockerfile
-    ports:
-      - "8080:8080"
-    # depends_on:
-    #   - timescaledb
-    # environment:
-    #   - DB_HOST=timescaledb
-    #   - DB_PORT=5432
-    #   - DB_USER=user
-    #   - DB_PASSWORD=password
-    #   - DB_NAME=candles
-    networks:
-      - candles-net
-
-  client-service:
-    build:
-      context: .
-      dockerfile: client-service/Dockerfile
     depends_on:
-      - candles-service
-      # - timescaledb
+      kafka:
+        condition: service_healthy
     networks:
       - candles-net
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for kafka to be ready...'
+        while ! nc -z kafka 29092; do
+          sleep 1
+        done;
+        echo 'Kafka is ready, starting candles-service...'
+        ./candles-service
+      "
 
 networks:
   candles-net:
     driver: bridge
-# volumes:
-# timescaledb-data:

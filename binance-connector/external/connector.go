@@ -1,54 +1,44 @@
-package binance
+package external
 
 import (
 	"context"
 	"encoding/json"
-	"hermeneutic/internal/candles/aggregator"
+	binanceconnector "hermeneutic/binance-connector"
 	"strings"
 	"time"
 
-	"github.com/shopspring/decimal"
-
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/segmentio/kafka-go"
+	"github.com/shopspring/decimal"
 )
 
 const (
-	WebSocketURL = "wss://stream.binance.com:9443/ws"
+	webSocketURL = "wss://stream.binance.com:9443/ws"
 )
 
 type Connector struct {
-	aggregator *aggregator.Aggregator
-	pairs      []string
-	stopChan   chan struct{}
+	producer *kafka.Writer
+	pairs    []string
 }
 
-func NewConnector(agg *aggregator.Aggregator, pairs []string) *Connector {
+func NewConnector(producer *kafka.Writer, pairs []string) *Connector {
 	return &Connector{
-		aggregator: agg,
-		pairs:      pairs,
-		stopChan:   make(chan struct{}),
+		producer: producer,
+		pairs:    pairs,
 	}
 }
 
 func (c *Connector) Start(ctx context.Context) {
-	go c.run(ctx)
-}
-
-func (c *Connector) Stop() {
-	close(c.stopChan)
-}
-
-func (c *Connector) run(ctx context.Context) {
-	log.Info().Msg("starting connector")
-	defer log.Info().Msg("connector stopped")
+	log.Info().Msg("starting binance connector")
+	defer log.Info().Msg("binance connector stopped")
 
 	var streams []string
 	for _, p := range c.pairs {
 		streams = append(streams, strings.ToLower(strings.Replace(p, "-", "", 1))+"@aggTrade")
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(WebSocketURL, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(webSocketURL, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to connect to webSocket")
 		return
@@ -67,21 +57,25 @@ func (c *Connector) run(ctx context.Context) {
 
 	log.Info().Strs("streams", streams).Msg("subscribed to trade streams")
 
-	for {
-		select {
-		case <-c.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		default:
+	go func() {
+		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Error().Err(err).Msg("error reading from webSocket")
 				return
 			}
-			c.handleMessage(message)
+			c.handleMessage(ctx, message)
 		}
-	}
+	}()
+
+	<-ctx.Done()
+}
+
+type Trade struct {
+	InstrumentPair string          `json:"instrument_pair"`
+	Price          decimal.Decimal `json:"price"`
+	Quantity       decimal.Decimal `json:"quantity"`
+	Timestamp      time.Time       `json:"timestamp"`
 }
 
 type AggTrade struct {
@@ -91,9 +85,10 @@ type AggTrade struct {
 	Timestamp int64  `json:"T"`
 }
 
-func (c *Connector) handleMessage(msg []byte) {
+func (c *Connector) handleMessage(ctx context.Context, msg []byte) {
 	var tradeData AggTrade
 	if err := json.Unmarshal(msg, &tradeData); err != nil {
+		log.Warn().Err(err).Msg("failed to unmarshal trade data")
 		return
 	}
 
@@ -108,17 +103,28 @@ func (c *Connector) handleMessage(msg []byte) {
 		return
 	}
 
-	// Binance provides timestamp in milliseconds
 	timestamp := time.Unix(0, tradeData.Timestamp*int64(time.Millisecond))
 
 	pair := tradeData.Symbol[:len(tradeData.Symbol)-4] + "-USDT"
 
-	trade := aggregator.Trade{
+	trade := Trade{
 		InstrumentPair: pair,
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,
 	}
 
-	c.aggregator.AddTrade(trade)
+	payload, err := json.Marshal(trade)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to marshal trade")
+		return
+	}
+
+	err = c.producer.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(binanceconnector.ToInternal(trade.InstrumentPair)),
+		Value: payload,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to write message to kafka")
+	}
 }

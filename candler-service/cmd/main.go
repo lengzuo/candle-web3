@@ -2,27 +2,38 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"hermeneutic/external/binance"
 	"hermeneutic/internal/candles/aggregator"
 	candlesgrpc "hermeneutic/internal/candles/transport/grpc"
 	v1 "hermeneutic/pkg/proto/v1"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/segmentio/kafka-go"
+	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
 )
+
+const topic = "trades"
+
+type Trade struct {
+	InstrumentPair string          `json:"instrument_pair"`
+	Price          decimal.Decimal `json:"price"`
+	Quantity       decimal.Decimal `json:"quantity"`
+	Timestamp      time.Time       `json:"timestamp"`
+}
 
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
 
-	// Configuration to set for intervals default 5 seconds
 	interval := flag.Int("interval", 5, "The time interval in seconds for creating OHLC candles.")
 	port := flag.Int("port", 8080, "The port for the grpc server to listen on.")
 	flag.Parse()
@@ -35,7 +46,42 @@ func main() {
 	agg := aggregator.NewAggregator(time.Duration(*interval) * time.Second)
 	defer agg.Stop()
 
-	pairs := []string{"BTC-USDT", "ETH-USDT", "SOL-USDT"}
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
+		log.Fatal().Msg("KAFKA_BROKERS environment variable not set")
+	}
+
+	consumer := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: strings.Split(kafkaBrokers, ","),
+		Topic:   topic,
+		GroupID: "candles-service",
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				msg, err := consumer.ReadMessage(ctx)
+				if err != nil {
+					log.Error().Err(err).Msg("failed to read message from kafka")
+					return
+				}
+
+				var trade Trade
+				if err := json.Unmarshal(msg.Value, &trade); err != nil {
+					log.Warn().Err(err).Msg("failed to unmarshal trade")
+					continue
+				}
+
+				agg.AddTrade(aggregator.Trade(trade))
+			}
+		}
+	}()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
@@ -50,15 +96,6 @@ func main() {
 	// Candles service register for grpc server
 	v1.RegisterCandlesServiceServer(s, grpcServer)
 
-	// Graceful Shutdown signal
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	binanceConnector := binance.NewConnector(agg, pairs)
-	binanceConnector.Start(ctx)
-	defer binanceConnector.Stop()
-
-	// Start the grpc server in a separate goroutine
 	go func() {
 		log.Info().Msgf("grpc server listening at %v", lis.Addr())
 		if err := s.Serve(lis); err != nil {
