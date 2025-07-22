@@ -3,9 +3,10 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"hermeneutic/internal/dto"
+	krakenconnector "hermeneutic/kraken-connector"
 	"hermeneutic/utils/async"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
@@ -28,17 +29,18 @@ const (
 )
 
 type Connector struct {
-	producer  *kafka.Writer
-	pairs     []string
-	tradeChan chan Trade
+	producer   *kafka.Writer
+	pairs      []string
+	tradeChan  chan dto.Trade
+	numWorkers int
 }
 
-func NewConnector(producer *kafka.Writer, pairs []string) *Connector {
+func NewConnector(producer *kafka.Writer, pairs []string, numWorkers int) *Connector {
 	return &Connector{
-		producer: producer,
-		pairs:    pairs,
-		// In case of Kafka down, we want to ensure the channel won't grow indefinitely
-		tradeChan: make(chan Trade, 1000),
+		producer:   producer,
+		pairs:      pairs,
+		tradeChan:  make(chan dto.Trade, 1000),
+		numWorkers: numWorkers,
 	}
 }
 
@@ -74,11 +76,13 @@ func (c *Connector) Start(ctx context.Context) {
 		c.readMessages(ctx, conn)
 	})
 
-	wg.Add(1)
-	async.Go(func() {
-		defer wg.Done()
-		c.writeMessages(ctx)
-	})
+	wg.Add(c.numWorkers)
+	for range c.numWorkers {
+		async.Go(func() {
+			defer wg.Done()
+			c.worker(ctx)
+		})
+	}
 
 	<-ctx.Done()
 	wg.Wait()
@@ -101,7 +105,7 @@ func (c *Connector) readMessages(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (c *Connector) writeMessages(ctx context.Context) {
+func (c *Connector) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,14 +128,8 @@ func (c *Connector) writeMessages(ctx context.Context) {
 	}
 }
 
-type Trade struct {
-	InstrumentPair string          `json:"instrument_pair"`
-	Price          decimal.Decimal `json:"price"`
-	Quantity       decimal.Decimal `json:"quantity"`
-	Timestamp      time.Time       `json:"timestamp"`
-}
-
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
+	log.Debug().Msgf("process [kraken]: %s", msg)
 	var tradeData []any
 	if err := json.Unmarshal(msg, &tradeData); err != nil {
 		return
@@ -183,8 +181,8 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 			continue
 		}
 
-		trade := Trade{
-			InstrumentPair: pair,
+		trade := dto.Trade{
+			InstrumentPair: krakenconnector.ToSymbol(pair),
 			Price:          price,
 			Quantity:       quantity,
 			Timestamp:      timestamp,

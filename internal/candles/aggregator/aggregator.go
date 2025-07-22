@@ -31,7 +31,7 @@ type candleBuilder struct {
 type Aggregator struct {
 	interval      time.Duration
 	tradeChan     chan Trade
-	candleChan    chan *v1.Candle
+	outputChan    chan *v1.Candle
 	stopChan      chan struct{}
 	activeCandles map[string]*candleBuilder
 	mu            sync.RWMutex
@@ -41,7 +41,7 @@ func NewAggregator(interval time.Duration) *Aggregator {
 	agg := &Aggregator{
 		interval:      interval,
 		tradeChan:     make(chan Trade, 1000),
-		candleChan:    make(chan *v1.Candle, 100),
+		outputChan:    make(chan *v1.Candle, 100),
 		stopChan:      make(chan struct{}),
 		activeCandles: make(map[string]*candleBuilder),
 	}
@@ -125,8 +125,8 @@ func (a *Aggregator) finalizeCandles() {
 			Timestamp:      timestamppb.New(time.Now().Truncate(a.interval)),
 		}
 
-		// Send the finalized candle to the grpc broadcaster.
-		a.candleChan <- candle
+		// Send the finalized candle to the internal output channel.
+		a.outputChan <- candle
 
 		log.Debug().
 			Str("pair", pair).
@@ -140,10 +140,19 @@ func (a *Aggregator) AddTrade(trade Trade) {
 	a.tradeChan <- trade
 }
 
-func (a *Aggregator) CandleChannel() <-chan *v1.Candle {
-	return a.candleChan
+// OutputChannel returns the channel where finalized candles are sent.
+// This will be consumed by the Broadcaster.
+func (a *Aggregator) OutputChannel() <-chan *v1.Candle {
+	return a.outputChan
 }
 
 func (a *Aggregator) Stop() {
 	close(a.stopChan)
+	// Close the output channel after the run loop has exited
+	// to signal to the broadcaster that no more candles will come.
+	// This needs to be done carefully to avoid closing a channel
+	// that might still be read from by the broadcaster.
+	// For now, we'll rely on the main context cancellation to stop
+	// the broadcaster, which will then stop reading from this channel.
+	// A more robust solution might involve a separate done channel for the aggregator's run loop.
 }

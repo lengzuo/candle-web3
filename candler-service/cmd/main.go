@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"hermeneutic/internal/candles/aggregator"
+	"hermeneutic/internal/candles/broadcaster"
 	candlesgrpc "hermeneutic/internal/candles/transport/grpc"
 	v1 "hermeneutic/pkg/proto/v1"
 	"hermeneutic/utils/async"
@@ -93,7 +94,8 @@ func main() {
 	// Create a new grpc server
 	s := grpc.NewServer()
 
-	grpcServer := candlesgrpc.NewCandlesServer(agg)
+	b := broadcaster.NewBroadcaster(agg.OutputChannel())
+	grpcServer := candlesgrpc.NewCandlesServer(b)
 
 	// Candles service register for grpc server
 	v1.RegisterCandlesServiceServer(s, grpcServer)

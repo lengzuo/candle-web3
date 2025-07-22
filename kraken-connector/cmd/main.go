@@ -5,6 +5,7 @@ import (
 	"hermeneutic/kraken-connector/external"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,9 +31,15 @@ func main() {
 	})
 	defer producer.Close()
 
+	numWorkersStr := os.Getenv("NUM_WORKERS")
+	numWorkers, err := strconv.Atoi(numWorkersStr)
+	if err != nil || numWorkers <= 0 {
+		numWorkers = 100
+	}
+
 	pairs := []string{"BTC/USDT", "ETH/USDT", "SOL/USDT"}
 
-	conn := external.NewConnector(producer, pairs)
+	conn := external.NewConnector(producer, pairs, numWorkers)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

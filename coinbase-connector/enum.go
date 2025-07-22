@@ -1,13 +1,13 @@
-package binanceconnector
+package coinbaseconnector
 
 import "hermeneutic/utils/token"
 
 type Pair string
 
 const (
-	BTC_USDT Pair = "BTCUSDT"
-	ETH_USDT Pair = "ETHUSDT"
-	SOL_USDT Pair = "SOLUSDT"
+	BTC_USDT Pair = "BTC-USDT"
+	ETH_USDT Pair = "ETH-USDT"
+	SOL_USDT Pair = "SOL-USDT"
 )
 
 func (t Pair) String() string {

@@ -3,6 +3,8 @@ package external
 import (
 	"context"
 	"encoding/json"
+	binanceconnector "hermeneutic/binance-connector"
+	"hermeneutic/internal/dto"
 	"hermeneutic/utils/async"
 	"strings"
 	"sync"
@@ -19,16 +21,18 @@ const (
 )
 
 type Connector struct {
-	producer  *kafka.Writer
-	pairs     []string
-	tradeChan chan Trade
+	producer   *kafka.Writer
+	pairs      []string
+	tradeChan  chan dto.Trade
+	numWorkers int
 }
 
-func NewConnector(producer *kafka.Writer, pairs []string) *Connector {
+func NewConnector(producer *kafka.Writer, pairs []string, numWorkers int) *Connector {
 	return &Connector{
-		producer:  producer,
-		pairs:     pairs,
-		tradeChan: make(chan Trade, 1000),
+		producer:   producer,
+		pairs:      pairs,
+		tradeChan:  make(chan dto.Trade, 1000),
+		numWorkers: numWorkers,
 	}
 }
 
@@ -66,11 +70,15 @@ func (c *Connector) Start(ctx context.Context) {
 		c.readMessages(ctx, conn)
 	})
 
-	wg.Add(1)
-	async.Go(func() {
-		defer wg.Done()
-		c.writeMessages(ctx)
-	})
+	// Start worker pool so that we can process the incoming trade
+	// concurrency
+	wg.Add(c.numWorkers)
+	for range c.numWorkers {
+		async.Go(func() {
+			defer wg.Done()
+			c.worker(ctx)
+		})
+	}
 
 	<-ctx.Done()
 	wg.Wait()
@@ -93,7 +101,7 @@ func (c *Connector) readMessages(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (c *Connector) writeMessages(ctx context.Context) {
+func (c *Connector) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -116,13 +124,6 @@ func (c *Connector) writeMessages(ctx context.Context) {
 	}
 }
 
-type Trade struct {
-	InstrumentPair string          `json:"instrument_pair"`
-	Price          decimal.Decimal `json:"price"`
-	Quantity       decimal.Decimal `json:"quantity"`
-	Timestamp      time.Time       `json:"timestamp"`
-}
-
 type AggTrade struct {
 	Symbol    string `json:"s"`
 	Price     string `json:"p"`
@@ -134,7 +135,6 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 	log.Debug().Msgf("process [binance]: %s", msg)
 	var tradeData AggTrade
 	if err := json.Unmarshal(msg, &tradeData); err != nil {
-		log.Warn().Err(err).Msg("failed to unmarshal trade data")
 		return
 	}
 
@@ -151,14 +151,11 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 
 	timestamp := time.Unix(0, tradeData.Timestamp*int64(time.Millisecond))
 
-	pair := tradeData.Symbol[:len(tradeData.Symbol)-4] + "-USDT"
-
-	trade := Trade{
-		InstrumentPair: pair,
+	trade := dto.Trade{
+		InstrumentPair: binanceconnector.ToSymbol(tradeData.Symbol),
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,
 	}
-
 	c.tradeChan <- trade
 }

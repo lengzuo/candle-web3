@@ -47,6 +47,7 @@ services:
       - candles-net
     environment:
       - KAFKA_BROKERS=kafka:29092
+      - NUM_WORKERS=500
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'
@@ -68,6 +69,7 @@ services:
       - candles-net
     environment:
       - KAFKA_BROKERS=kafka:29092
+      - NUM_WORKERS=100
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'
@@ -89,6 +91,7 @@ services:
       - candles-net
     environment:
       - KAFKA_BROKERS=kafka:29092
+      - NUM_WORKERS=100
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'

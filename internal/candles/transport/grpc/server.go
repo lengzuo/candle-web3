@@ -6,18 +6,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type Aggregator interface {
-	CandleChannel() <-chan *v1.Candle
+type Broadcaster interface {
+	RegisterClient(chan *v1.Candle)
+	UnregisterClient(chan *v1.Candle)
 }
 
 type CandlesServer struct {
 	v1.UnimplementedCandlesServiceServer
-	aggregator Aggregator
+	broadcaster Broadcaster
 }
 
-func NewCandlesServer(aggregator Aggregator) *CandlesServer {
+func NewCandlesServer(broadcaster Broadcaster) *CandlesServer {
 	return &CandlesServer{
-		aggregator: aggregator,
+		broadcaster: broadcaster,
 	}
 }
 
@@ -27,19 +28,24 @@ func (s *CandlesServer) SubscribeCandles(req *v1.SubscribeCandlesRequest, stream
 		subscribedPairs[pair] = struct{}{}
 	}
 
-	candleChan := s.aggregator.CandleChannel()
+	clientChan := make(chan *v1.Candle, 100)
+	s.broadcaster.RegisterClient(clientChan)
+	defer s.broadcaster.UnregisterClient(clientChan)
+
 	ctx := stream.Context()
+	log.Info().Msg("client subscribed for candles")
 
 	for {
 		select {
-		case candle := <-candleChan:
+		case candle := <-clientChan:
 			if _, ok := subscribedPairs[candle.InstrumentPair]; ok {
 				if err := stream.Send(candle); err != nil {
-					log.Err(err).Msgf("failed in sending stream")
+					log.Err(err).Msg("failed to send stream")
 					return err
 				}
 			}
 		case <-ctx.Done():
+			log.Info().Msg("client unsubscribed for candles")
 			return ctx.Err()
 		}
 	}

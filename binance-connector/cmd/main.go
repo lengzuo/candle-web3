@@ -6,6 +6,7 @@ import (
 	"hermeneutic/binance-connector/external"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,12 @@ func main() {
 		log.Fatal().Msg("KAFKA_BROKERS environment variable not set")
 	}
 
+	numWorkersStr := os.Getenv("NUM_WORKERS")
+	numWorkers, err := strconv.Atoi(numWorkersStr)
+	if err != nil || numWorkers <= 0 {
+		numWorkers = 500
+	}
+
 	producer := kafka.NewWriter(kafka.WriterConfig{
 		Brokers: strings.Split(kafkaBrokers, ","),
 		Topic:   topic,
@@ -35,7 +42,7 @@ func main() {
 
 	pairs := []string{binanceconnector.BTC_USDT.String(), binanceconnector.ETH_USDT.String(), binanceconnector.SOL_USDT.String()}
 
-	conn := external.NewConnector(producer, pairs)
+	conn := external.NewConnector(producer, pairs, numWorkers)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
