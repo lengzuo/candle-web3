@@ -3,7 +3,6 @@ package external
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -13,7 +12,17 @@ import (
 )
 
 const (
-	webSocketURL = "wss://stream.binance.com:9443/ws"
+	webSocketURL    = "wss://ws.kraken.com"
+	channel_id      = 0
+	trade_info      = 1
+	channel_name    = 2
+	trade_pair      = 3
+	trade_price     = 0
+	trade_volumne   = 1
+	trade_timestamp = 2
+	trade_side      = 3
+	trade_orderType = 4
+	trade_misc      = 5
 )
 
 type Connector struct {
@@ -24,20 +33,16 @@ type Connector struct {
 
 func NewConnector(producer *kafka.Writer, pairs []string) *Connector {
 	return &Connector{
-		producer:  producer,
-		pairs:     pairs,
+		producer: producer,
+		pairs:    pairs,
+		// In case of Kafka down, we want to ensure the channel won't grow indefinitely
 		tradeChan: make(chan Trade, 1000),
 	}
 }
 
 func (c *Connector) Start(ctx context.Context) {
-	log.Info().Msg("starting binance connector")
-	defer log.Info().Msg("binance connector stopped")
-
-	var streams []string
-	for _, p := range c.pairs {
-		streams = append(streams, strings.ToLower(strings.Replace(p, "-", "", 1))+"@aggTrade")
-	}
+	log.Info().Msg("starting kraken connector")
+	defer log.Info().Msg("kraken connector stopped")
 
 	conn, _, err := websocket.DefaultDialer.Dial(webSocketURL, nil)
 	if err != nil {
@@ -47,16 +52,18 @@ func (c *Connector) Start(ctx context.Context) {
 	defer conn.Close()
 
 	subscribeMsg := map[string]interface{}{
-		"method": "SUBSCRIBE",
-		"params": streams,
-		"id":     1,
+		"event": "subscribe",
+		"pair":  c.pairs,
+		"subscription": map[string]string{
+			"name": "trade",
+		},
 	}
 	if err := conn.WriteJSON(subscribeMsg); err != nil {
 		log.Error().Err(err).Msg("failed to subscribe to streams")
 		return
 	}
 
-	log.Info().Strs("streams", streams).Msg("subscribed to trade streams")
+	log.Info().Strs("streams", c.pairs).Msg("subscribed to trade streams")
 
 	go c.readMessages(ctx, conn)
 	go c.writeMessages(ctx)
@@ -111,41 +118,65 @@ type Trade struct {
 	Timestamp      time.Time       `json:"timestamp"`
 }
 
-type AggTrade struct {
-	Symbol    string `json:"s"`
-	Price     string `json:"p"`
-	Quantity  string `json:"q"`
-	Timestamp int64  `json:"T"`
-}
-
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
-	var tradeData AggTrade
+	var tradeData []any
 	if err := json.Unmarshal(msg, &tradeData); err != nil {
-		log.Warn().Err(err).Msg("failed to unmarshal trade data")
 		return
 	}
 
-	price, err := decimal.NewFromString(tradeData.Price)
-	if err != nil {
-		log.Warn().Err(err).Str("price", tradeData.Price).Msg("could not parse trade price")
-		return
-	}
-	quantity, err := decimal.NewFromString(tradeData.Quantity)
-	if err != nil {
-		log.Warn().Err(err).Str("quantity", tradeData.Quantity).Msg("could not parse trade quantity")
+	// Ensure the message is a trade message, which has a specific length and structure.
+	if len(tradeData) != 4 || tradeData[channel_name] != "trade" {
 		return
 	}
 
-	timestamp := time.Unix(0, tradeData.Timestamp*int64(time.Millisecond))
-
-	pair := tradeData.Symbol[:len(tradeData.Symbol)-4] + "-USDT"
-
-	trade := Trade{
-		InstrumentPair: pair,
-		Price:          price,
-		Quantity:       quantity,
-		Timestamp:      timestamp,
+	trades, ok := tradeData[trade_info].([]any)
+	if !ok {
+		return
 	}
 
-	c.tradeChan <- trade
+	pair, ok := tradeData[trade_pair].(string)
+	if !ok {
+		return
+	}
+
+	for _, t := range trades {
+		tradeInfo, ok := t.([]any)
+		if !ok || len(tradeInfo) < 3 {
+			continue
+		}
+
+		priceStr, pOk := tradeInfo[trade_price].(string)
+		quantityStr, qOk := tradeInfo[trade_volumne].(string)
+		timestampStr, tOk := tradeInfo[trade_timestamp].(string)
+
+		if !pOk || !qOk || !tOk {
+			continue
+		}
+
+		price, err := decimal.NewFromString(priceStr)
+		if err != nil {
+			log.Warn().Err(err).Str("price", priceStr).Msg("could not parse trade price")
+			continue
+		}
+		quantity, err := decimal.NewFromString(quantityStr)
+		if err != nil {
+			log.Warn().Err(err).Str("quantity", quantityStr).Msg("could not parse trade quantity")
+			continue
+		}
+
+		timestamp, err := ParseTimestamp(timestampStr)
+		if err != nil {
+			log.Warn().Err(err).Str("timestamp", timestampStr).Msg("could not parse trade timestamp")
+			continue
+		}
+
+		trade := Trade{
+			InstrumentPair: pair,
+			Price:          price,
+			Quantity:       quantity,
+			Timestamp:      timestamp,
+		}
+
+		c.tradeChan <- trade
+	}
 }
