@@ -18,6 +18,10 @@ import (
 
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	if os.Getenv("ENV") == "production" {
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+	}
 	_ = godotenv.Load()
 
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
