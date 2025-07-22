@@ -151,8 +151,12 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 
 	timestamp := time.Unix(0, tradeData.Timestamp*int64(time.Millisecond))
 
+	instrumentPair := binanceconnector.ToSymbol(tradeData.Symbol)
+	if instrumentPair == "" {
+		return
+	}
 	trade := dto.Trade{
-		InstrumentPair: binanceconnector.ToSymbol(tradeData.Symbol),
+		InstrumentPair: instrumentPair,
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,

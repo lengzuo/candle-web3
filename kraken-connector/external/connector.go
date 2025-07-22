@@ -7,6 +7,7 @@ import (
 	krakenconnector "hermeneutic/kraken-connector"
 	"hermeneutic/utils/async"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
@@ -15,17 +16,7 @@ import (
 )
 
 const (
-	webSocketURL    = "wss://ws.kraken.com"
-	channel_id      = 0
-	trade_info      = 1
-	channel_name    = 2
-	trade_pair      = 3
-	trade_price     = 0
-	trade_volumne   = 1
-	trade_timestamp = 2
-	trade_side      = 3
-	trade_orderType = 4
-	trade_misc      = 5
+	webSocketURL = "wss://ws.kraken.com/v2"
 )
 
 type Connector struct {
@@ -56,10 +47,10 @@ func (c *Connector) Start(ctx context.Context) {
 	defer conn.Close()
 
 	subscribeMsg := map[string]interface{}{
-		"event": "subscribe",
-		"pair":  c.pairs,
-		"subscription": map[string]string{
-			"name": "trade",
+		"method": "subscribe",
+		"params": map[string]interface{}{
+			"channel": "trade",
+			"symbol":  c.pairs,
 		},
 	}
 	if err := conn.WriteJSON(subscribeMsg); err != nil {
@@ -128,65 +119,61 @@ func (c *Connector) worker(ctx context.Context) {
 	}
 }
 
+type KrakenV2Trade struct {
+	Symbol    string `json:"symbol"`
+	Price     string `json:"price"`
+	Qty       string `json:"qty"`
+	Timestamp string `json:"timestamp"`
+}
+
+type KrakenV2Message struct {
+	Channel string          `json:"channel"`
+	Data    []KrakenV2Trade `json:"data"`
+}
+
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 	log.Debug().Msgf("process [kraken]: %s", msg)
-	var tradeData []any
-	if err := json.Unmarshal(msg, &tradeData); err != nil {
+	var v2Msg KrakenV2Message
+	if err := json.Unmarshal(msg, &v2Msg); err != nil {
+		// Ignore non-v2 messages or errors (e.g., heartbeats, status messages)
 		return
 	}
 
-	// Ensure the message is a trade message, which has a specific length and structure.
-	if len(tradeData) != 4 || tradeData[channel_name] != "trade" {
+	if v2Msg.Channel != "trade" {
+		// Ignore non-trade messages (e.g., "heartbeat", "status")
 		return
 	}
 
-	trades, ok := tradeData[trade_info].([]any)
-	if !ok {
-		return
-	}
-
-	pair, ok := tradeData[trade_pair].(string)
-	if !ok {
-		return
-	}
-
-	for _, t := range trades {
-		tradeInfo, ok := t.([]any)
-		if !ok || len(tradeInfo) < 3 {
-			continue
-		}
-
-		priceStr, pOk := tradeInfo[trade_price].(string)
-		quantityStr, qOk := tradeInfo[trade_volumne].(string)
-		timestampStr, tOk := tradeInfo[trade_timestamp].(string)
-
-		if !pOk || !qOk || !tOk {
-			continue
-		}
-
-		price, err := decimal.NewFromString(priceStr)
+	for _, tradeData := range v2Msg.Data {
+		price, err := decimal.NewFromString(tradeData.Price)
 		if err != nil {
-			log.Warn().Err(err).Str("price", priceStr).Msg("could not parse trade price")
+			log.Warn().Err(err).Str("price", tradeData.Price).Msg("could not parse trade price")
 			continue
 		}
-		quantity, err := decimal.NewFromString(quantityStr)
+		quantity, err := decimal.NewFromString(tradeData.Qty)
 		if err != nil {
-			log.Warn().Err(err).Str("quantity", quantityStr).Msg("could not parse trade quantity")
+			log.Warn().Err(err).Str("quantity", tradeData.Qty).Msg("could not parse trade quantity")
 			continue
 		}
 
-		timestamp, err := ParseTimestamp(timestampStr)
+		// Kraken v2 timestamp is ISO 8601 string, not Unix timestamp
+		timestamp, err := time.Parse(time.RFC3339Nano, tradeData.Timestamp)
 		if err != nil {
-			log.Warn().Err(err).Str("timestamp", timestampStr).Msg("could not parse trade timestamp")
+			log.Warn().Err(err).Str("timestamp", tradeData.Timestamp).Msg("could not parse trade timestamp")
 			continue
 		}
 
+		instrumentPair := krakenconnector.ToSymbol(tradeData.Symbol)
+		if instrumentPair == "" {
+			continue
+		}
 		trade := dto.Trade{
-			InstrumentPair: krakenconnector.ToSymbol(pair),
+			InstrumentPair: instrumentPair,
 			Price:          price,
 			Quantity:       quantity,
 			Timestamp:      timestamp,
 		}
+		log.Debug().Msgf("trade: %#v", trade)
 
 		c.tradeChan <- trade
 	}

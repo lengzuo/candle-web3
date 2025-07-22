@@ -153,8 +153,12 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 		return
 	}
 
+	instrumentPair := coinbaseconnector.ToSymbol(match.ProductID)
+	if instrumentPair == "" {
+		return
+	}
 	trade := dto.Trade{
-		InstrumentPair: coinbaseconnector.ToSymbol(match.ProductID),
+		InstrumentPair: instrumentPair,
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,

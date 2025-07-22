@@ -52,10 +52,10 @@ services:
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'
-        while ! nc -z kafka 29092; do
-          sleep 1
-        done;
-        echo 'Kafka is ready, starting binance-connector...'
+        while ! nc -z kafka 29092; do sleep 1; done;
+        echo 'Giving Kafka 5s to create topics...'
+        sleep 5;
+        echo 'Starting binance-connector...'
         /binance-connector
       "
 
@@ -75,10 +75,10 @@ services:
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'
-        while ! nc -z kafka 29092; do
-          sleep 1
-        done;
-        echo 'Kafka is ready, starting kraken-connector...'
+        while ! nc -z kafka 29092; do sleep 1; done;
+        echo 'Giving Kafka 5s to create topics...'
+        sleep 5;
+        echo 'Starting kraken-connector...'
         /kraken-connector
       "
 
@@ -98,10 +98,10 @@ services:
     entrypoint: >
       /bin/sh -c "
         echo 'Waiting for kafka to be ready...'
-        while ! nc -z kafka 29092; do
-          sleep 1
-        done;
-        echo 'Kafka is ready, starting coinbase-connector...'
+        while ! nc -z kafka 29092; do sleep 1; done;
+        echo 'Giving Kafka 5s to create topics...'
+        sleep 5;
+        echo 'Starting coinbase-connector...'
         /coinbase-connector
       "
 
