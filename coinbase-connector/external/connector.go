@@ -14,17 +14,7 @@ import (
 )
 
 const (
-	webSocketURL    = "wss://ws.kraken.com"
-	channel_id      = 0
-	trade_info      = 1
-	channel_name    = 2
-	trade_pair      = 3
-	trade_price     = 0
-	trade_volumne   = 1
-	trade_timestamp = 2
-	trade_side      = 3
-	trade_orderType = 4
-	trade_misc      = 5
+	webSocketURL = "wss://ws-feed.exchange.coinbase.com"
 )
 
 type Connector struct {
@@ -35,16 +25,15 @@ type Connector struct {
 
 func NewConnector(producer *kafka.Writer, pairs []string) *Connector {
 	return &Connector{
-		producer: producer,
-		pairs:    pairs,
-		// In case of Kafka down, we want to ensure the channel won't grow indefinitely
+		producer:  producer,
+		pairs:     pairs,
 		tradeChan: make(chan Trade, 1000),
 	}
 }
 
 func (c *Connector) Start(ctx context.Context) {
-	log.Info().Msg("starting kraken connector")
-	defer log.Info().Msg("kraken connector stopped")
+	log.Info().Msg("starting coinbase connector")
+	defer log.Info().Msg("coinbase connector stopped")
 
 	conn, _, err := websocket.DefaultDialer.Dial(webSocketURL, nil)
 	if err != nil {
@@ -54,11 +43,9 @@ func (c *Connector) Start(ctx context.Context) {
 	defer conn.Close()
 
 	subscribeMsg := map[string]interface{}{
-		"event": "subscribe",
-		"pair":  c.pairs,
-		"subscription": map[string]string{
-			"name": "trade",
-		},
+		"type":        "subscribe",
+		"product_ids": c.pairs,
+		"channels":    []string{"matches"},
 	}
 	if err := conn.WriteJSON(subscribeMsg); err != nil {
 		log.Error().Err(err).Msg("failed to subscribe to streams")
@@ -66,8 +53,8 @@ func (c *Connector) Start(ctx context.Context) {
 	}
 
 	log.Info().Strs("streams", c.pairs).Msg("subscribed to trade streams")
-	var wg sync.WaitGroup
 
+	var wg sync.WaitGroup
 	wg.Add(1)
 	async.Go(func() {
 		defer wg.Done()
@@ -131,65 +118,47 @@ type Trade struct {
 	Timestamp      time.Time       `json:"timestamp"`
 }
 
+type CoinbaseMatch struct {
+	Type      string `json:"type"`
+	ProductID string `json:"product_id"`
+	Price     string `json:"price"`
+	Size      string `json:"size"`
+	Time      string `json:"time"`
+}
+
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
-	var tradeData []any
-	if err := json.Unmarshal(msg, &tradeData); err != nil {
+	var match CoinbaseMatch
+	if err := json.Unmarshal(msg, &match); err != nil {
 		return
 	}
 
-	// Ensure the message is a trade message, which has a specific length and structure.
-	if len(tradeData) != 4 || tradeData[channel_name] != "trade" {
+	if match.Type != "match" {
 		return
 	}
 
-	trades, ok := tradeData[trade_info].([]any)
-	if !ok {
+	price, err := decimal.NewFromString(match.Price)
+	if err != nil {
+		log.Warn().Err(err).Str("price", match.Price).Msg("could not parse trade price")
+		return
+	}
+	quantity, err := decimal.NewFromString(match.Size)
+	if err != nil {
+		log.Warn().Err(err).Str("quantity", match.Size).Msg("could not parse trade quantity")
 		return
 	}
 
-	pair, ok := tradeData[trade_pair].(string)
-	if !ok {
+	timestamp, err := time.Parse(time.RFC3339Nano, match.Time)
+	if err != nil {
+		log.Warn().Err(err).Str("timestamp", match.Time).Msg("could not parse trade timestamp")
 		return
 	}
 
-	for _, t := range trades {
-		tradeInfo, ok := t.([]any)
-		if !ok || len(tradeInfo) < 3 {
-			continue
-		}
-
-		priceStr, pOk := tradeInfo[trade_price].(string)
-		quantityStr, qOk := tradeInfo[trade_volumne].(string)
-		timestampStr, tOk := tradeInfo[trade_timestamp].(string)
-
-		if !pOk || !qOk || !tOk {
-			continue
-		}
-
-		price, err := decimal.NewFromString(priceStr)
-		if err != nil {
-			log.Warn().Err(err).Str("price", priceStr).Msg("could not parse trade price")
-			continue
-		}
-		quantity, err := decimal.NewFromString(quantityStr)
-		if err != nil {
-			log.Warn().Err(err).Str("quantity", quantityStr).Msg("could not parse trade quantity")
-			continue
-		}
-
-		timestamp, err := ParseTimestamp(timestampStr)
-		if err != nil {
-			log.Warn().Err(err).Str("timestamp", timestampStr).Msg("could not parse trade timestamp")
-			continue
-		}
-
-		trade := Trade{
-			InstrumentPair: pair,
-			Price:          price,
-			Quantity:       quantity,
-			Timestamp:      timestamp,
-		}
-
-		c.tradeChan <- trade
+	trade := Trade{
+		InstrumentPair: match.ProductID,
+		Price:          price,
+		Quantity:       quantity,
+		Timestamp:      timestamp,
 	}
+
+	c.tradeChan <- trade
 }

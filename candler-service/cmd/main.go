@@ -8,6 +8,7 @@ import (
 	"hermeneutic/internal/candles/aggregator"
 	candlesgrpc "hermeneutic/internal/candles/transport/grpc"
 	v1 "hermeneutic/pkg/proto/v1"
+	"hermeneutic/utils/async"
 	"net"
 	"os"
 	"os/signal"
@@ -18,11 +19,10 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/segmentio/kafka-go"
+
 	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
 )
-
-const topic = "trades"
 
 type Trade struct {
 	InstrumentPair string          `json:"instrument_pair"`
@@ -30,6 +30,8 @@ type Trade struct {
 	Quantity       decimal.Decimal `json:"quantity"`
 	Timestamp      time.Time       `json:"timestamp"`
 }
+
+const topic = "trades"
 
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
@@ -60,7 +62,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
+	async.Go(func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -81,7 +83,7 @@ func main() {
 				agg.AddTrade(aggregator.Trade(trade))
 			}
 		}
-	}()
+	})
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

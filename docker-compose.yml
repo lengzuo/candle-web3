@@ -78,6 +78,27 @@ services:
         /kraken-connector
       "
 
+  coinbase-connector:
+    build:
+      context: .
+      dockerfile: coinbase-connector/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - candles-net
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for kafka to be ready...'
+        while ! nc -z kafka 29092; do
+          sleep 1
+        done;
+        echo 'Kafka is ready, starting coinbase-connector...'
+        /coinbase-connector
+      "
+
   candles-service:
     build:
       context: .

@@ -2,6 +2,7 @@ package aggregator
 
 import (
 	v1 "hermeneutic/pkg/proto/v1"
+	"hermeneutic/utils/async"
 	"sync"
 	"time"
 
@@ -44,7 +45,7 @@ func NewAggregator(interval time.Duration) *Aggregator {
 		stopChan:      make(chan struct{}),
 		activeCandles: make(map[string]*candleBuilder),
 	}
-	go agg.run()
+	async.Go(func() { agg.run() })
 	return agg
 }
 

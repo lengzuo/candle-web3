@@ -3,7 +3,9 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"hermeneutic/utils/async"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -57,11 +59,21 @@ func (c *Connector) Start(ctx context.Context) {
 	}
 
 	log.Info().Strs("streams", streams).Msg("subscribed to trade streams")
+	var wg sync.WaitGroup
+	wg.Add(1)
+	async.Go(func() {
+		defer wg.Done()
+		c.readMessages(ctx, conn)
+	})
 
-	go c.readMessages(ctx, conn)
-	go c.writeMessages(ctx)
+	wg.Add(1)
+	async.Go(func() {
+		defer wg.Done()
+		c.writeMessages(ctx)
+	})
 
 	<-ctx.Done()
+	wg.Wait()
 	close(c.tradeChan)
 }
 
@@ -119,6 +131,7 @@ type AggTrade struct {
 }
 
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
+	log.Debug().Msgf("process [binance]: %s", msg)
 	var tradeData AggTrade
 	if err := json.Unmarshal(msg, &tradeData); err != nil {
 		log.Warn().Err(err).Msg("failed to unmarshal trade data")
