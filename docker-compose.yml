@@ -36,6 +36,22 @@ services:
     networks:
       - candles-net
 
+  client-service:
+    build:
+      context: .
+      dockerfile: client-service/Dockerfile
+    depends_on:
+      - candles-service
+    networks:
+      - candles-net
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for candles-service to be ready...'
+        while ! nc -z candles-service 8080; do sleep 1; done;
+        echo 'Candles-service is ready, starting client-service...'
+        ./client-service --server=candles-service:8080 --pairs=btcusdt,ethusdt
+      "
+
   binance-connector:
     build:
       context: .

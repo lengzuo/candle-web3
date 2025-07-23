@@ -1,49 +1,35 @@
 package aggregator
 
 import (
+	"hermeneutic/internal/dto"
 	v1 "hermeneutic/pkg/proto/v1"
 	"hermeneutic/utils/async"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/shopspring/decimal"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type Trade struct {
-	InstrumentPair string
-	Price          decimal.Decimal
-	Quantity       decimal.Decimal
-	Timestamp      time.Time
-}
-
-type candleBuilder struct {
-	InstrumentPair string
-	Open           decimal.Decimal
-	High           decimal.Decimal
-	Low            decimal.Decimal
-	Close          decimal.Decimal
-	Volume         decimal.Decimal
-	TradeCount     int64
-}
-
 type Aggregator struct {
-	interval      time.Duration
-	tradeChan     chan Trade
-	outputChan    chan *v1.Candle
-	stopChan      chan struct{}
-	activeCandles map[string]*candleBuilder
-	mu            sync.RWMutex
+	interval          time.Duration
+	tradeChan         chan dto.Trade
+	outputChan        chan *v1.Candle
+	stopChan          chan struct{}
+	activeCandles     map[string]map[int64]*dto.ActiveCandle // Changed
+	mu                sync.RWMutex
+	lastFinalizedTime map[string]time.Time
 }
 
 func NewAggregator(interval time.Duration) *Aggregator {
 	agg := &Aggregator{
-		interval:      interval,
-		tradeChan:     make(chan Trade, 1000),
-		outputChan:    make(chan *v1.Candle, 100),
-		stopChan:      make(chan struct{}),
-		activeCandles: make(map[string]*candleBuilder),
+		interval:          interval,
+		tradeChan:         make(chan dto.Trade, 1000),
+		outputChan:        make(chan *v1.Candle, 100),
+		stopChan:          make(chan struct{}),
+		activeCandles:     make(map[string]map[int64]*dto.ActiveCandle), // Changed
+		lastFinalizedTime: make(map[string]time.Time),
 	}
 	async.Go(func() { agg.run() })
 	return agg
@@ -53,7 +39,6 @@ func (a *Aggregator) run() {
 	log.Info().Msg("aggregator started")
 	defer log.Info().Msg("aggregator stopped")
 
-	// This ticker determines when to finalize and emit a candle
 	ticker := time.NewTicker(a.interval)
 	defer ticker.Stop()
 
@@ -62,81 +47,95 @@ func (a *Aggregator) run() {
 		case trade := <-a.tradeChan:
 			a.processTrade(trade)
 		case <-ticker.C:
-			a.finalizeCandles()
+			a.finalizeCandles(time.Now())
 		case <-a.stopChan:
 			return
 		}
 	}
 }
 
-func (a *Aggregator) processTrade(trade Trade) {
+func (a *Aggregator) processTrade(trade dto.Trade) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	candle, ok := a.activeCandles[trade.InstrumentPair]
+	candleTime := trade.Timestamp.Truncate(a.interval)
+
+	if lastFinalized, ok := a.lastFinalizedTime[trade.InstrumentPair]; ok {
+		if !candleTime.After(lastFinalized) {
+			log.Warn().
+				Str("instrument", trade.InstrumentPair).
+				Int64("trade_id", trade.TradeID).
+				Time("trade_ts", trade.Timestamp).
+				Time("candle_ts", candleTime).
+				Time("last_finalized_ts", lastFinalized).
+				Msg("Received out-of-order trade for an already finalized candle. Discarding.")
+			return
+		}
+	}
+
+	ts := candleTime.UnixNano()
+
+	pairCandles, ok := a.activeCandles[trade.InstrumentPair]
 	if !ok {
-		// First trade for this interval, create a new candle.
-		a.activeCandles[trade.InstrumentPair] = &candleBuilder{
-			InstrumentPair: trade.InstrumentPair,
-			Open:           trade.Price,
-			High:           trade.Price,
-			Low:            trade.Price,
-			Close:          trade.Price,
-			Volume:         trade.Quantity,
-			TradeCount:     1,
-		}
-		return
+		pairCandles = make(map[int64]*dto.ActiveCandle)
+		a.activeCandles[trade.InstrumentPair] = pairCandles
 	}
 
-	if trade.Price.GreaterThan(candle.High) {
-		candle.High = trade.Price
-	}
-	if trade.Price.LessThan(candle.Low) {
-		candle.Low = trade.Price
+	activeCandle, ok := pairCandles[ts]
+	if !ok {
+		activeCandle = dto.NewActiveCandle()
+		pairCandles[ts] = activeCandle
 	}
 
-	candle.Close = trade.Price
-	candle.Volume = candle.Volume.Add(trade.Quantity)
-	candle.TradeCount++
+	activeCandle.AddTrade(&trade)
 }
 
-// finalizeCandles sends the completed candles and resets for the next interval
-func (a *Aggregator) finalizeCandles() {
+func (a *Aggregator) finalizeCandles(now time.Time) {
 	a.mu.Lock()
-	if len(a.activeCandles) == 0 {
-		a.mu.Unlock()
-		return
+	defer a.mu.Unlock()
+
+	cutoffTime := now.Truncate(a.interval)
+
+	sortedPairs := make([]string, 0, len(a.activeCandles))
+	for pair := range a.activeCandles {
+		sortedPairs = append(sortedPairs, pair)
 	}
+	slices.Sort(sortedPairs)
 
-	buildersToFinalize := a.activeCandles
-	a.activeCandles = make(map[string]*candleBuilder)
-	a.mu.Unlock()
+	for _, pair := range sortedPairs {
+		pairCandles := a.activeCandles[pair]
 
-	log.Debug().Msgf("finalizing %d candles for the interval", len(buildersToFinalize))
-
-	for pair, builder := range buildersToFinalize {
-		candle := &v1.Candle{
-			InstrumentPair: builder.InstrumentPair,
-			Open:           builder.Open.String(),
-			High:           builder.High.String(),
-			Low:            builder.Low.String(),
-			Close:          builder.Close.String(),
-			Volume:         builder.Volume.String(),
-			Timestamp:      timestamppb.New(time.Now().Truncate(a.interval)),
+		sortedTimestamps := make([]int64, 0, len(pairCandles))
+		for ts := range pairCandles {
+			sortedTimestamps = append(sortedTimestamps, ts)
 		}
+		slices.Sort(sortedTimestamps)
 
-		// Send the finalized candle to the internal output channel.
-		a.outputChan <- candle
+		for _, ts := range sortedTimestamps {
+			candleStartTime := time.Unix(0, ts)
+			if candleStartTime.Before(cutoffTime) {
+				activeCandle := pairCandles[ts]
 
-		log.Debug().
-			Str("pair", pair).
-			Str("close", candle.Close).
-			Int64("trade_count", builder.TradeCount).
-			Msg("Finalized candle")
+				if activeCandle.TradeCount > 0 {
+					finalCandle := &v1.Candle{
+						InstrumentPair: pair,
+						Open:           activeCandle.Open().String(),
+						High:           activeCandle.High.String(),
+						Low:            activeCandle.Low.String(),
+						Close:          activeCandle.Close().String(),
+						Volume:         activeCandle.Volume.String(),
+						Timestamp:      timestamppb.New(candleStartTime),
+					}
+					a.outputChan <- finalCandle
+					a.lastFinalizedTime[pair] = candleStartTime
+				}
+				delete(pairCandles, ts)
+			}
+		}
 	}
 }
 
-func (a *Aggregator) AddTrade(trade Trade) {
+func (a *Aggregator) AddTrade(trade dto.Trade) {
 	a.tradeChan <- trade
 }
 
@@ -148,11 +147,4 @@ func (a *Aggregator) OutputChannel() <-chan *v1.Candle {
 
 func (a *Aggregator) Stop() {
 	close(a.stopChan)
-	// Close the output channel after the run loop has exited
-	// to signal to the broadcaster that no more candles will come.
-	// This needs to be done carefully to avoid closing a channel
-	// that might still be read from by the broadcaster.
-	// For now, we'll rely on the main context cancellation to stop
-	// the broadcaster, which will then stop reading from this channel.
-	// A more robust solution might involve a separate done channel for the aggregator's run loop.
 }

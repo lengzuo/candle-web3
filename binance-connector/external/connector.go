@@ -125,10 +125,11 @@ func (c *Connector) worker(ctx context.Context) {
 }
 
 type AggTrade struct {
-	Symbol    string `json:"s"`
-	Price     string `json:"p"`
-	Quantity  string `json:"q"`
-	Timestamp int64  `json:"T"`
+	Symbol     string `json:"s"`
+	Price      string `json:"p"`
+	Quantity   string `json:"q"`
+	Timestamp  int64  `json:"T"`
+	AggTradeID int64  `json:"a"`
 }
 
 func (c *Connector) handleMessage(_ context.Context, msg []byte) {
@@ -156,10 +157,11 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 		return
 	}
 	trade := dto.Trade{
-		InstrumentPair: instrumentPair,
+		InstrumentPair: instrumentPair.String(),
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,
+		TradeID:        tradeData.AggTradeID,
 	}
 	c.tradeChan <- trade
 }

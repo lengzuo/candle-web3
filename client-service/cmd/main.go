@@ -16,7 +16,7 @@ import (
 
 func main() {
 	serverAddr := flag.String("server", "candles-service:8080", "The address of the candles-service gRPC server.")
-	pairsStr := flag.String("pairs", "BTC-USDT,ETH-USDT", "A comma-separated list of instrument pairs to subscribe to.")
+	pairsStr := flag.String("pairs", "btcusdt,ethusdt", "A comma-separated list of instrument pairs to subscribe to.")
 	flag.Parse()
 
 	pairs := strings.Split(*pairsStr, ",")

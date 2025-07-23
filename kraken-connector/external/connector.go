@@ -120,10 +120,11 @@ func (c *Connector) worker(ctx context.Context) {
 }
 
 type KrakenV2Trade struct {
-	Symbol    string `json:"symbol"`
-	Price     string `json:"price"`
-	Qty       string `json:"qty"`
-	Timestamp string `json:"timestamp"`
+	Symbol    string          `json:"symbol"`
+	Price     decimal.Decimal `json:"price"`
+	Qty       decimal.Decimal `json:"qty"`
+	Timestamp time.Time       `json:"timestamp"`
+	TradeID   int64           `json:"trade_id"`
 }
 
 type KrakenV2Message struct {
@@ -135,45 +136,25 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 	log.Debug().Msgf("process [kraken]: %s", msg)
 	var v2Msg KrakenV2Message
 	if err := json.Unmarshal(msg, &v2Msg); err != nil {
-		// Ignore non-v2 messages or errors (e.g., heartbeats, status messages)
 		return
 	}
 
 	if v2Msg.Channel != "trade" {
-		// Ignore non-trade messages (e.g., "heartbeat", "status")
 		return
 	}
 
 	for _, tradeData := range v2Msg.Data {
-		price, err := decimal.NewFromString(tradeData.Price)
-		if err != nil {
-			log.Warn().Err(err).Str("price", tradeData.Price).Msg("could not parse trade price")
-			continue
-		}
-		quantity, err := decimal.NewFromString(tradeData.Qty)
-		if err != nil {
-			log.Warn().Err(err).Str("quantity", tradeData.Qty).Msg("could not parse trade quantity")
-			continue
-		}
-
-		// Kraken v2 timestamp is ISO 8601 string, not Unix timestamp
-		timestamp, err := time.Parse(time.RFC3339Nano, tradeData.Timestamp)
-		if err != nil {
-			log.Warn().Err(err).Str("timestamp", tradeData.Timestamp).Msg("could not parse trade timestamp")
-			continue
-		}
-
 		instrumentPair := krakenconnector.ToSymbol(tradeData.Symbol)
 		if instrumentPair == "" {
 			continue
 		}
 		trade := dto.Trade{
-			InstrumentPair: instrumentPair,
-			Price:          price,
-			Quantity:       quantity,
-			Timestamp:      timestamp,
+			InstrumentPair: instrumentPair.String(),
+			Price:          tradeData.Price,
+			Quantity:       tradeData.Qty,
+			Timestamp:      tradeData.Timestamp,
+			TradeID:        tradeData.TradeID,
 		}
-		log.Debug().Msgf("trade: %#v", trade)
 
 		c.tradeChan <- trade
 	}

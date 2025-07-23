@@ -8,6 +8,7 @@ import (
 	"hermeneutic/internal/candles/aggregator"
 	"hermeneutic/internal/candles/broadcaster"
 	candlesgrpc "hermeneutic/internal/candles/transport/grpc"
+	"hermeneutic/internal/dto"
 	v1 "hermeneutic/pkg/proto/v1"
 	"hermeneutic/utils/async"
 	"net"
@@ -21,16 +22,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/segmentio/kafka-go"
 
-	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
 )
-
-type Trade struct {
-	InstrumentPair string          `json:"instrument_pair"`
-	Price          decimal.Decimal `json:"price"`
-	Quantity       decimal.Decimal `json:"quantity"`
-	Timestamp      time.Time       `json:"timestamp"`
-}
 
 const topic = "trades"
 
@@ -75,13 +68,13 @@ func main() {
 					return
 				}
 
-				var trade Trade
+				var trade dto.Trade
 				if err := json.Unmarshal(msg.Value, &trade); err != nil {
 					log.Warn().Err(err).Msg("failed to unmarshal trade")
 					continue
 				}
 
-				agg.AddTrade(aggregator.Trade(trade))
+				agg.AddTrade(trade)
 			}
 		}
 	})

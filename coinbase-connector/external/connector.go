@@ -119,6 +119,7 @@ func (c *Connector) worker(ctx context.Context) {
 
 type CoinbaseMatch struct {
 	Type      string `json:"type"`
+	TradeID   int64  `json:"trade_id"`
 	ProductID string `json:"product_id"`
 	Price     string `json:"price"`
 	Size      string `json:"size"`
@@ -132,7 +133,7 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 		return
 	}
 
-	if match.Type != "match" {
+	if match.Type != "match" && match.Type != "last_match" {
 		return
 	}
 
@@ -158,10 +159,11 @@ func (c *Connector) handleMessage(_ context.Context, msg []byte) {
 		return
 	}
 	trade := dto.Trade{
-		InstrumentPair: instrumentPair,
+		InstrumentPair: instrumentPair.String(),
 		Price:          price,
 		Quantity:       quantity,
 		Timestamp:      timestamp,
+		TradeID:        match.TradeID,
 	}
 
 	c.tradeChan <- trade
