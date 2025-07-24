@@ -58,13 +58,14 @@ func main() {
 		}
 
 		// Print the received candle to stdout
-		fmt.Printf("🕯️  [%s] Pair: %s | Open: %s | High: %s | Low: %s | Close: %s\n",
+		fmt.Printf("🕯️  [%s] Pair: %s | Open: %s | High: %s | Low: %s | Close: %s | Volume: %s\n",
 			candle.Timestamp.AsTime().Format(time.RFC3339),
 			candle.InstrumentPair,
 			candle.Open,
 			candle.High,
 			candle.Low,
 			candle.Close,
+			candle.Volume,
 		)
 	}
 }

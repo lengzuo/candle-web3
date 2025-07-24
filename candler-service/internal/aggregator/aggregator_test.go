@@ -96,3 +96,67 @@ func TestFinalizeCandles_DeterministicOrder(t *testing.T) {
 	assert.Equal(t, "BTC-USDT", receivedCandles[0].InstrumentPair, "First candle should be BTC-USDT")
 	assert.Equal(t, "ETH-USDT", receivedCandles[1].InstrumentPair, "Second candle should be ETH-USDT")
 }
+
+func TestFinalizeCandles_ConsolidatedFromMultipleExchanges(t *testing.T) {
+	interval := time.Minute
+	agg := NewAggregator(interval)
+	defer agg.Stop()
+
+	baseTime, _ := time.Parse(time.RFC3339Nano, "2025-07-23T08:00:00Z")
+
+	trades := []dto.Trade{
+		{
+			InstrumentPair: "BTC-USDT",
+			// Exchange:       "Binance",
+			Price:     decimal.NewFromFloat(60000.0),
+			Quantity:  decimal.NewFromFloat(0.1),
+			Timestamp: baseTime,
+		},
+		{
+			InstrumentPair: "BTC-USDT",
+			// Exchange:       "Kraken",
+			Price:     decimal.NewFromFloat(62000.0),
+			Quantity:  decimal.NewFromFloat(0.2),
+			Timestamp: baseTime.Add(1 * time.Second),
+		},
+		{
+			InstrumentPair: "BTC-USDT",
+			// Exchange:       "Coinbase",
+			Price:     decimal.NewFromFloat(59000.0),
+			Quantity:  decimal.NewFromFloat(0.15),
+			Timestamp: baseTime.Add(2 * time.Second),
+		},
+		{
+			InstrumentPair: "BTC-USDT",
+			// Exchange:       "Binance",
+			Price:     decimal.NewFromFloat(61000.0),
+			Quantity:  decimal.NewFromFloat(0.05),
+			Timestamp: baseTime.Add(3 * time.Second),
+		},
+	}
+
+	for _, trade := range trades {
+		agg.processTrade(trade)
+	}
+
+	cutoffTime := baseTime.Add(interval)
+	agg.finalizeCandles(cutoffTime)
+
+	select {
+	case finalizedCandle := <-agg.OutputChannel():
+		assert.Equal(t, "BTC-USDT", finalizedCandle.InstrumentPair)
+		assert.Equal(t, "60000", finalizedCandle.Open, "Open price is incorrect")
+		assert.Equal(t, "62000", finalizedCandle.High, "High price is incorrect")
+		assert.Equal(t, "59000", finalizedCandle.Low, "Low price is incorrect")
+		assert.Equal(t, "61000", finalizedCandle.Close, "Close price is incorrect")
+
+		expectedVolume := decimal.NewFromFloat(0.1 + 0.2 + 0.15 + 0.05)
+		assert.Equal(t, expectedVolume.String(), finalizedCandle.Volume, "Volume is incorrect")
+
+		expectedCandleTime := baseTime.Truncate(interval)
+		assert.Equal(t, expectedCandleTime.Unix(), finalizedCandle.Timestamp.Seconds, "Candle timestamp is incorrect")
+
+	case <-time.After(2 * time.Second):
+		t.Fatal("Test timed out waiting for a candle to be finalized")
+	}
+}
