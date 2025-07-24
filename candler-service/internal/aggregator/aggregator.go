@@ -68,7 +68,7 @@ func (a *Aggregator) processTrade(trade dto.Trade) {
 				Time("trade_ts", trade.Timestamp).
 				Time("candle_ts", candleTime).
 				Time("last_finalized_ts", lastFinalized).
-				Msg("Received out-of-order trade for an already finalized candle. Discarding.")
+				Msg("received out-of-order trade for an already finalized candle. Discarding.")
 			return
 		}
 	}

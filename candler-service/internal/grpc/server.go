@@ -1,52 +1,46 @@
 package grpc
 
 import (
+	"hermeneutic/candler-service/internal/broadcaster"
 	v1 "hermeneutic/pkg/proto/v1"
 
 	"github.com/rs/zerolog/log"
 )
 
-type Broadcaster interface {
-	RegisterClient(chan *v1.Candle)
-	UnregisterClient(chan *v1.Candle)
-}
-
 type CandlesServer struct {
 	v1.UnimplementedCandlesServiceServer
-	broadcaster Broadcaster
+	broadcaster *broadcaster.Broadcaster
 }
 
-func NewCandlesServer(broadcaster Broadcaster) *CandlesServer {
-	return &CandlesServer{
-		broadcaster: broadcaster,
-	}
+func NewCandlesServer(b *broadcaster.Broadcaster) *CandlesServer {
+	return &CandlesServer{broadcaster: b}
 }
 
 func (s *CandlesServer) SubscribeCandles(req *v1.SubscribeCandlesRequest, stream v1.CandlesService_SubscribeCandlesServer) error {
-	subscribedPairs := make(map[string]struct{}, len(req.InstrumentPairs))
+	log.Info().Strs("pairs", req.InstrumentPairs).Msg("client subscribed")
+	candleChan := make(chan *v1.Candle, 100)
+
 	for _, pair := range req.InstrumentPairs {
-		subscribedPairs[pair] = struct{}{}
+		s.broadcaster.Subscribe(pair, candleChan)
 	}
 
-	clientChan := make(chan *v1.Candle, 100)
-	s.broadcaster.RegisterClient(clientChan)
-	defer s.broadcaster.UnregisterClient(clientChan)
-
-	ctx := stream.Context()
-	log.Info().Msg("client subscribed for candles")
+	defer func() {
+		for _, pair := range req.InstrumentPairs {
+			s.broadcaster.Unsubscribe(pair, candleChan)
+		}
+		close(candleChan)
+		log.Info().Strs("pairs", req.InstrumentPairs).Msg("client unsubscribed")
+	}()
 
 	for {
 		select {
-		case candle := <-clientChan:
-			if _, ok := subscribedPairs[candle.InstrumentPair]; ok {
-				if err := stream.Send(candle); err != nil {
-					log.Err(err).Msg("failed to send stream")
-					return err
-				}
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case candle := <-candleChan:
+			if err := stream.Send(candle); err != nil {
+				log.Error().Err(err).Msg("failed to send candle to client")
+				return err
 			}
-		case <-ctx.Done():
-			log.Info().Msg("client unsubscribed for candles")
-			return ctx.Err()
 		}
 	}
 }

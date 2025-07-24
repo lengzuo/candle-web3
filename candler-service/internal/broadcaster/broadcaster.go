@@ -1,91 +1,128 @@
 package broadcaster
 
 import (
-	"sync"
-
+	"context"
+	"encoding/json"
+	"fmt"
 	v1 "hermeneutic/pkg/proto/v1"
 	"hermeneutic/utils/async"
+	"sync"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/rs/zerolog/log"
 )
 
-// Broadcaster manages the fan-out of candles to multiple gRPC clients.
 type Broadcaster struct {
-	clients    sync.Map // Stores client channels: map[client_id]chan *v1.Candle
-	inputChan  <-chan *v1.Candle
-	register   chan chan *v1.Candle
-	unregister chan chan *v1.Candle
+	redisClient      *redis.Client
+	subscriptions    map[string]map[chan *v1.Candle]struct{}
+	mu               sync.RWMutex
+	redisCancelFuncs map[string]context.CancelFunc
+	registerChan     chan *subscription
+	unregisterChan   chan *subscription
 }
 
-// NewBroadcaster creates and returns a new Broadcaster instance.
-func NewBroadcaster(inputChan <-chan *v1.Candle) *Broadcaster {
+type subscription struct {
+	pair string
+	ch   chan *v1.Candle
+}
+
+func NewBroadcaster(redisAddr string) *Broadcaster {
+	rdb := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+
 	b := &Broadcaster{
-		clients:    sync.Map{},
-		inputChan:  inputChan,
-		register:   make(chan chan *v1.Candle),
-		unregister: make(chan chan *v1.Candle),
+		redisClient:      rdb,
+		subscriptions:    make(map[string]map[chan *v1.Candle]struct{}),
+		redisCancelFuncs: make(map[string]context.CancelFunc),
+		registerChan:     make(chan *subscription),
+		unregisterChan:   make(chan *subscription),
 	}
-	async.Go(func() { b.run() }) // Start the main run loop in a goroutine
+
+	go b.run()
 	return b
 }
 
-// run is the main loop of the Broadcaster. It listens for new candles
-// and client registration/unregistration requests.
 func (b *Broadcaster) run() {
-	log.Info().Msg("broadcaster started")
-	defer log.Info().Msg("broadcaster stopped")
-
 	for {
 		select {
-		case clientChan := <-b.register:
-			// A new client wants to subscribe
-			b.clients.Store(clientChan, true)
-			log.Debug().Msg("new client registered with broadcaster")
-		case clientChan := <-b.unregister:
-			// A client wants to unsubscribe
-			b.clients.Delete(clientChan)
-			close(clientChan)
-			log.Debug().Msg("client unregistered from broadcaster")
-		case candle, ok := <-b.inputChan:
-			// A new candle is available from the aggregator
-			if !ok {
-				// Input channel closed, gracefully shut down
-				log.Info().Msg("broadcaster input channel closed, shutting down clients")
-				b.clients.Range(func(key, value any) bool {
-					clientChan, ok := key.(chan *v1.Candle)
-					if ok {
-						close(clientChan)
-					}
-					b.clients.Delete(key)
-					return true
-				})
-				return
-			}
-			// Fan out the candle to all active clients
-			b.clients.Range(func(key, value any) bool {
-				clientChan, ok := key.(chan *v1.Candle)
-				if !ok {
-					return true
-				}
-				select {
-				case clientChan <- candle:
-					// Successfully sent to client
-				default:
-					// Client's channel is full, drop message and log warning
-					log.Warn().Msg("client channel full, dropping candle")
-				}
-				return true
-			})
+		case s := <-b.registerChan:
+			b.addSubscription(s.pair, s.ch)
+		case s := <-b.unregisterChan:
+			b.removeSubscription(s.pair, s.ch)
 		}
 	}
 }
 
-// RegisterClient is called by the gRPC server to register a new client's channel.
-func (b *Broadcaster) RegisterClient(clientChan chan *v1.Candle) {
-	b.register <- clientChan
+func (b *Broadcaster) addSubscription(pair string, ch chan *v1.Candle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.subscriptions[pair]; !ok {
+		b.subscriptions[pair] = make(map[chan *v1.Candle]struct{})
+		// Start a cancel context to cancel when subscriber is stop
+		ctx, cancel := context.WithCancel(context.Background())
+		b.redisCancelFuncs[pair] = cancel
+		async.Go(func() { b.subscribeToRedis(ctx, pair) })
+	}
+	b.subscriptions[pair][ch] = struct{}{}
 }
 
-// UnregisterClient is called by the gRPC server to unregister a client's channel.
-func (b *Broadcaster) UnregisterClient(clientChan chan *v1.Candle) {
-	b.unregister <- clientChan
+func (b *Broadcaster) removeSubscription(pair string, ch chan *v1.Candle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if chans, ok := b.subscriptions[pair]; ok {
+		delete(chans, ch)
+		if len(chans) == 0 {
+			delete(b.subscriptions, pair)
+			if cancel, ok := b.redisCancelFuncs[pair]; ok {
+				cancel()
+				delete(b.redisCancelFuncs, pair)
+			}
+		}
+	}
+}
+
+func (b *Broadcaster) subscribeToRedis(ctx context.Context, pair string) {
+	channel := fmt.Sprintf("candles:%s", pair)
+	pubsub := b.redisClient.Subscribe(ctx, channel)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Str("pair", pair).Msg("redis subscription context cancelled, stopping goroutine.")
+			return
+		case msg := <-ch:
+			var candle v1.Candle
+			if err := json.Unmarshal([]byte(msg.Payload), &candle); err != nil {
+				log.Warn().Err(err).Msg("failed to unmarshal candle from redis")
+				continue
+			}
+
+			b.mu.RLock()
+			if chans, ok := b.subscriptions[pair]; ok {
+				for clientChan := range chans {
+					select {
+					case clientChan <- &candle:
+						// Successfully sent
+					default:
+						log.Warn().Str("pair", pair).Msg("client channel full, dropping candle.")
+					}
+				}
+			}
+			b.mu.RUnlock()
+		}
+	}
+}
+
+func (b *Broadcaster) Subscribe(pair string, ch chan *v1.Candle) {
+	b.registerChan <- &subscription{pair: pair, ch: ch}
+}
+
+func (b *Broadcaster) Unsubscribe(pair string, ch chan *v1.Candle) {
+	b.unregisterChan <- &subscription{pair: pair, ch: ch}
 }

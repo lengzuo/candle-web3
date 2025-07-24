@@ -8,6 +8,7 @@ import (
 	"hermeneutic/candler-service/internal/aggregator"
 	"hermeneutic/candler-service/internal/broadcaster"
 	candlesgrpc "hermeneutic/candler-service/internal/grpc"
+	"hermeneutic/candler-service/internal/publisher"
 	"hermeneutic/internal/dto"
 	v1 "hermeneutic/pkg/proto/v1"
 	"hermeneutic/utils/async"
@@ -21,7 +22,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/segmentio/kafka-go"
-
 	"google.golang.org/grpc"
 )
 
@@ -45,6 +45,11 @@ func main() {
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 	if kafkaBrokers == "" {
 		log.Fatal().Msg("KAFKA_BROKERS environment variable not set")
+	}
+
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		log.Fatal().Msg("REDIS_ADDR environment variable not set")
 	}
 
 	consumer := kafka.NewReader(kafka.ReaderConfig{
@@ -79,18 +84,17 @@ func main() {
 		}
 	})
 
+	pub := publisher.NewPublisher(redisAddr, agg.OutputChannel())
+	defer pub.Stop()
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to listen for grpc server")
 	}
 
-	// Create a new grpc server
 	s := grpc.NewServer()
-
-	b := broadcaster.NewBroadcaster(agg.OutputChannel())
+	b := broadcaster.NewBroadcaster(redisAddr)
 	grpcServer := candlesgrpc.NewCandlesServer(b)
-
-	// Candles service register for grpc server
 	v1.RegisterCandlesServiceServer(s, grpcServer)
 
 	go func() {
@@ -103,6 +107,23 @@ func main() {
 	<-ctx.Done()
 
 	log.Info().Msg("shutting down grpc server...")
-	s.GracefulStop()
-	log.Info().Msg("server gracefully stopped")
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+
+	// Attempt graceful shutdown
+	go func() {
+		s.GracefulStop()
+		log.Info().Msg("server gracefully stopped")
+		cancelShutdown() // Signal that graceful stop is complete
+	}()
+
+	// Wait for either graceful stop to complete or timeout
+	<-shutdownCtx.Done()
+
+	// If the context was cancelled by timeout, it means graceful stop didn't finish in time
+	if shutdownCtx.Err() == context.DeadlineExceeded {
+		log.Warn().Msg("graceful shutdown timed out, forcing server stop...")
+		s.Stop() // Force stop if graceful shutdown takes too long
+		log.Info().Msg("server forcefully stopped")
+	}
 }

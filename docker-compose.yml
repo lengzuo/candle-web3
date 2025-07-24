@@ -36,20 +36,36 @@ services:
     networks:
       - candles-net
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks:
+      - candles-net
+
   client-service:
     build:
       context: .
       dockerfile: client-service/Dockerfile
     depends_on:
-      - candles-service
+      redis:
+        condition: service_healthy
     networks:
       - candles-net
+    environment:
+      - REDIS_ADDR=redis:6379
     entrypoint: >
       /bin/sh -c "
-        echo 'Waiting for candles-service to be ready...'
-        while ! nc -z candles-service 8080; do sleep 1; done;
-        echo 'Candles-service is ready, starting client-service...'
-        ./client-service --server=candles-service:8080 --pairs=btcusdt,ethusdt
+        echo 'Waiting for redis to be ready...'
+        while ! nc -z redis 6379; do sleep 1; done;
+        echo 'Redis is ready, starting client-service...'
+        ./client-service --pairs=btcusdt,ethusdt
       "
 
   binance-connector:
@@ -128,18 +144,20 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - candles-net
     environment:
       - KAFKA_BROKERS=kafka:29092
+      - REDIS_ADDR=redis:6379
       - ENV=production
     entrypoint: >
       /bin/sh -c "
-        echo 'Waiting for kafka to be ready...'
-        while ! nc -z kafka 29092; do
-          sleep 1
-        done;
-        echo 'Kafka is ready, starting candles-service...'
+        echo 'Waiting for kafka and redis to be ready...'
+        while ! nc -z kafka 29092; do sleep 1; done;
+        while ! nc -z redis 6379; do sleep 1; done;
+        echo 'Dependencies are ready, starting candles-service...'
         ./candles-service
       "
 
