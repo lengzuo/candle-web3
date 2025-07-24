@@ -62,7 +62,8 @@ func (a *Aggregator) processTrade(trade dto.Trade) {
 
 	if lastFinalized, ok := a.lastFinalizedTime[trade.InstrumentPair]; ok {
 		if !candleTime.After(lastFinalized) {
-			log.Warn().
+			// For fast path, we can simply ignore this and store all trade data into a timeseries database.
+			log.Debug().
 				Str("instrument", trade.InstrumentPair).
 				Int64("trade_id", trade.TradeID).
 				Time("trade_ts", trade.Timestamp).

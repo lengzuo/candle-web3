@@ -54,18 +54,15 @@ services:
       context: .
       dockerfile: client-service/Dockerfile
     depends_on:
-      redis:
-        condition: service_healthy
+      - candles-service
     networks:
       - candles-net
-    environment:
-      - REDIS_ADDR=redis:6379
     entrypoint: >
       /bin/sh -c "
-        echo 'Waiting for redis to be ready...'
-        while ! nc -z redis 6379; do sleep 1; done;
-        echo 'Redis is ready, starting client-service...'
-        ./client-service --pairs=btcusdt,ethusdt
+        echo 'Waiting for candles-service to be ready...' 
+        while ! nc -z candles-service 8080; do sleep 1; done;
+        echo 'Candles-service is ready, starting client-service...'
+        ./main --pairs=btcusdt,ethusdt,solusdt
       "
 
   binance-connector:
