@@ -10,11 +10,9 @@ The system is designed with a microservices architecture, where each component i
 
 - **Kafka:** Acts as the central message bus, decoupling the data producers (connectors) from the data consumer (candles-service). This provides resilience and scalability.
 
-- **Redis Pub/Sub:** Used by the `candles-service` for internal broadcasting of finalized candles. The `Publisher` component sends candles to Redis channels, and the `Broadcaster` component subscribes to these channels to fan out data to connected gRPC clients. This allows for efficient, low-latency distribution of candles within the `candles-service` or across multiple instances if scaled.
+- **`candles-service`:** This is the core service that consumes raw trades from Kafka. It contains an `Aggregator` to build OHLC candles. To enable horizontal scaling, the service's internal components are decoupled using Redis Pub/Sub for broadcasting finalized candles.
 
-- **`candles-service`:** This service consumes the raw trade data from Kafka. It contains an `Aggregator` that consolidates trades from all exchanges and builds OHLC candles for each instrument pair at a configurable interval. The finalized candles are then broadcasted to connected clients via a gRPC server.
-
-  - It uses a `Publisher` to send candles to Redis Pub/Sub and a `Broadcaster` to receive candles from Redis Pub/Sub and distribute them to gRPC clients.
+- **Redis Pub/Sub:** While Kafka handles data ingress, Redis is used for high-speed, low-latency broadcasting of the _finalized_ candles to all connected gRPC clients. This decouples the candle aggregation logic from the client-facing broadcast logic. Crucially, it allows the `candles-service` to be scaled horizontally: multiple instances can all publish to and subscribe from the same Redis channels, ensuring all clients receive all candles regardless of which instance they are connected to.
 
 - **`client-service`:** A simple grpc client that connects to the `candles-service`, subscribes to a list of instrument pairs, and prints the received candle data to standard output.
 
@@ -65,8 +63,6 @@ This command will build the Docker images for each service and start them in the
 
 ## Technical Decisions
 
-- **Go:** Chosen for its strong performance, excellent concurrency support, and robust standard library, making it well-suited for high-throughput data processing applications.
-
 - **Docker & Docker Compose:** Used to create a consistent, reproducible environment for development and deployment. This simplifies setup and ensures that all services run correctly together.
 
 - **Kafka:** Selected as the messaging backbone to decouple services and provide a scalable, fault-tolerant way to handle high volumes of trade data. This allows for easy addition of new data sources or consumers in the future.
@@ -80,8 +76,6 @@ This command will build the Docker images for each service and start them in the
 ## Future Improvements and Considerations
 
 For real life applications, the following are areas that could be enhanced in a production environment:
-
-- **Dynamic Client Subscriptions:** The gRPC `subscribe` endpoint could be enhanced to allow clients to modify their subscriptions at any time without reconnecting.
 
 - **Error Handling and Resilience:**
 
