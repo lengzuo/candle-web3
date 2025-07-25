@@ -39,7 +39,7 @@ func main() {
 		Int("port", *port).
 		Msg("starting candles-service")
 
-	agg := aggregator.NewAggregator(time.Duration(*interval) * time.Second)
+	agg := aggregator.NewAggregator(time.Duration(*interval)*time.Second, 1*time.Second)
 	defer agg.Stop()
 
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")

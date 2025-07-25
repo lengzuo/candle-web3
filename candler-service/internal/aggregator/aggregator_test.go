@@ -12,7 +12,7 @@ import (
 
 func TestFinalizeCandles_ArriveAtDiffOrder(t *testing.T) {
 	interval := time.Minute
-	agg := NewAggregator(interval)
+	agg := NewAggregator(interval, 1*time.Second)
 	defer agg.Stop()
 
 	tradeTime1, _ := time.Parse(time.RFC3339Nano, "2025-07-23T04:55:03.828369Z")
@@ -46,8 +46,7 @@ func TestFinalizeCandles_ArriveAtDiffOrder(t *testing.T) {
 		agg.processTrade(trade)
 	}
 
-	cutoffTime := tradeTime1.Add(interval)
-	agg.finalizeCandles(cutoffTime)
+	agg.finalizeCandles()
 
 	select {
 	case finalizedCandle := <-agg.OutputChannel():
@@ -67,7 +66,7 @@ func TestFinalizeCandles_ArriveAtDiffOrder(t *testing.T) {
 
 func TestFinalizeCandles_DeterministicOrder(t *testing.T) {
 	interval := time.Minute
-	agg := NewAggregator(interval)
+	agg := NewAggregator(interval, 1*time.Second)
 	defer agg.Stop()
 
 	ts, _ := time.Parse(time.RFC3339Nano, "2025-07-23T05:00:00Z")
@@ -79,27 +78,70 @@ func TestFinalizeCandles_DeterministicOrder(t *testing.T) {
 	agg.processTrade(trades[1])
 	agg.processTrade(trades[0])
 
-	cutoffTime := ts.Add(interval)
-	agg.finalizeCandles(cutoffTime)
+	// This call won't finalize anything yet because the watermark is at the candle time.
+	agg.finalizeCandles()
 
-	var receivedCandles []*v1.Candle
-	for i := 0; i < 2; i++ {
+	// no emitted yet.
+	select {
+	case c := <-agg.OutputChannel():
+		t.Fatalf("Expected no candle, but got one for %s", c.InstrumentPair)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Add later trade for EACH pair to advance their watermarks independently.
+	// The timestamp must be later than the candle time + flush delay.
+	laterBtcTrade := dto.Trade{
+		InstrumentPair: "BTC-USDT",
+		TradeID:        2,
+		Price:          decimal.NewFromInt(101),
+		Quantity:       decimal.NewFromInt(1),
+		Timestamp:      ts.Add(2 * time.Second),
+	}
+	agg.processTrade(laterBtcTrade)
+
+	laterEthTrade := dto.Trade{
+		InstrumentPair: "ETH-USDT",
+		TradeID:        2,
+		Price:          decimal.NewFromInt(51),
+		Quantity:       decimal.NewFromInt(1),
+		Timestamp:      ts.Add(2 * time.Second),
+	}
+	agg.processTrade(laterEthTrade)
+
+	// This second call to finalize should now flush the original two candles.
+	agg.finalizeCandles()
+
+	// Collect candles into a map to make the test order-agnostic,
+	// as the finalization order of different pairs isn't guaranteed.
+	receivedCandles := make(map[string]*v1.Candle)
+	for i := range 2 {
 		select {
 		case candle := <-agg.OutputChannel():
-			receivedCandles = append(receivedCandles, candle)
+			receivedCandles[candle.InstrumentPair] = candle
 		case <-time.After(1 * time.Second):
 			t.Fatalf("Timed out waiting for candle #%d", i+1)
 		}
 	}
 
-	assert.Len(t, receivedCandles, 2)
-	assert.Equal(t, "BTC-USDT", receivedCandles[0].InstrumentPair, "First candle should be BTC-USDT")
-	assert.Equal(t, "ETH-USDT", receivedCandles[1].InstrumentPair, "Second candle should be ETH-USDT")
+	assert.Len(t, receivedCandles, 2, "Expected to receive 2 candles")
+
+	// Assert that the correct candles exist in the map.
+	btcCandle, ok := receivedCandles["BTC-USDT"]
+	assert.True(t, ok, "Did not receive a candle for BTC-USDT")
+	if ok {
+		assert.Equal(t, "100", btcCandle.Open)
+	}
+
+	ethCandle, ok := receivedCandles["ETH-USDT"]
+	assert.True(t, ok, "Did not receive a candle for ETH-USDT")
+	if ok {
+		assert.Equal(t, "50", ethCandle.Open)
+	}
 }
 
 func TestFinalizeCandles_ConsolidatedFromMultipleExchanges(t *testing.T) {
 	interval := time.Minute
-	agg := NewAggregator(interval)
+	agg := NewAggregator(interval, 1*time.Second)
 	defer agg.Stop()
 
 	baseTime, _ := time.Parse(time.RFC3339Nano, "2025-07-23T08:00:00Z")
@@ -139,8 +181,7 @@ func TestFinalizeCandles_ConsolidatedFromMultipleExchanges(t *testing.T) {
 		agg.processTrade(trade)
 	}
 
-	cutoffTime := baseTime.Add(interval)
-	agg.finalizeCandles(cutoffTime)
+	agg.finalizeCandles()
 
 	select {
 	case finalizedCandle := <-agg.OutputChannel():

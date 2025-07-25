@@ -1,74 +1,12 @@
 package dto
 
 import (
-	"container/heap"
-
 	"github.com/shopspring/decimal"
 )
 
-// MinTradeHeap is a min-heap of trades, ordered by timestamp and trade_id.
-type MinTradeHeap []*Trade
-
-func (h MinTradeHeap) Len() int {
-	return len(h)
-}
-
-func (h MinTradeHeap) Less(i, j int) bool {
-	if h[i].Timestamp.Equal(h[j].Timestamp) {
-		return h[i].TradeID < h[j].TradeID
-	}
-	return h[i].Timestamp.Before(h[j].Timestamp)
-}
-
-func (h MinTradeHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func (h *MinTradeHeap) Push(x any) {
-	*h = append(*h, x.(*Trade))
-}
-
-func (h *MinTradeHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
-// MaxTradeHeap is a min-heap of trades, ordered by timestamp and trade_id.
-type MaxTradeHeap []*Trade
-
-func (h MaxTradeHeap) Len() int {
-	return len(h)
-}
-
-func (h MaxTradeHeap) Less(i, j int) bool {
-	if h[i].Timestamp.Equal(h[j].Timestamp) {
-		return h[i].TradeID > h[j].TradeID
-	}
-	return h[i].Timestamp.After(h[j].Timestamp)
-}
-
-func (h MaxTradeHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func (h *MaxTradeHeap) Push(x any) {
-	*h = append(*h, x.(*Trade))
-}
-
-func (h *MaxTradeHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
 type ActiveCandle struct {
-	MinHeap    MinTradeHeap
-	MaxHeap    MaxTradeHeap
+	firstTrade *Trade
+	lastTrade  *Trade
 	High       decimal.Decimal
 	Low        decimal.Decimal
 	Volume     decimal.Decimal
@@ -76,23 +14,42 @@ type ActiveCandle struct {
 }
 
 func NewActiveCandle() *ActiveCandle {
-	ac := &ActiveCandle{
-		MinHeap: make(MinTradeHeap, 0),
-		MaxHeap: make(MaxTradeHeap, 0),
+	return &ActiveCandle{}
+}
+
+// isTradeEarlier checks if trade `a` happened before trade `b`.
+func isTradeEarlier(a, b *Trade) bool {
+	if a.Timestamp.Equal(b.Timestamp) {
+		return a.TradeID < b.TradeID
 	}
-	heap.Init(&ac.MinHeap)
-	heap.Init(&ac.MaxHeap)
-	return ac
+	return a.Timestamp.Before(b.Timestamp)
+}
+
+// isTradeLater checks if trade `a` happened after trade `b`.
+func isTradeLater(a, b *Trade) bool {
+	if a.Timestamp.Equal(b.Timestamp) {
+		return a.TradeID > b.TradeID
+	}
+	return a.Timestamp.After(b.Timestamp)
 }
 
 func (ac *ActiveCandle) AddTrade(trade *Trade) {
-	heap.Push(&ac.MinHeap, trade)
-	heap.Push(&ac.MaxHeap, trade)
-
 	if ac.TradeCount == 0 {
+		ac.firstTrade = trade
+		ac.lastTrade = trade
 		ac.High = trade.Price
 		ac.Low = trade.Price
 	} else {
+		// Update first trade if the new one is earlier.
+		if isTradeEarlier(trade, ac.firstTrade) {
+			ac.firstTrade = trade
+		}
+		// Update last trade if the new one is later.
+		if isTradeLater(trade, ac.lastTrade) {
+			ac.lastTrade = trade
+		}
+
+		// Update high and low.
 		if trade.Price.GreaterThan(ac.High) {
 			ac.High = trade.Price
 		}
@@ -100,16 +57,39 @@ func (ac *ActiveCandle) AddTrade(trade *Trade) {
 			ac.Low = trade.Price
 		}
 	}
+
 	ac.Volume = ac.Volume.Add(trade.Quantity)
 	ac.TradeCount++
 }
 
-// Open returns the opening price from the min-heap.
+// Open returns the opening price, which is the price of the first trade.
 func (ac *ActiveCandle) Open() decimal.Decimal {
-	return ac.MinHeap[0].Price
+	if ac.firstTrade == nil {
+		return decimal.Zero
+	}
+	return ac.firstTrade.Price
 }
 
-// Close returns the closing price from the max-heap.
+// Close returns the closing price, which is the price of the last trade.
 func (ac *ActiveCandle) Close() decimal.Decimal {
-	return ac.MaxHeap[0].Price
+	if ac.lastTrade == nil {
+		return decimal.Zero
+	}
+	return ac.lastTrade.Price
+}
+
+// Open returns the opening price, which is the price of the first trade.
+func (ac *ActiveCandle) FirstTradeID() int64 {
+	if ac.firstTrade == nil {
+		return 0
+	}
+	return ac.firstTrade.TradeID
+}
+
+// Close returns the closing price, which is the price of the last trade.
+func (ac *ActiveCandle) LastTradeID() int64 {
+	if ac.lastTrade == nil {
+		return 0
+	}
+	return ac.lastTrade.TradeID
 }
