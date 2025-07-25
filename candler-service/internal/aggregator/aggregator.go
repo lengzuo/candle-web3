@@ -114,7 +114,7 @@ func (a *Aggregator) processTrade(trade dto.Trade) {
 	if !pairData.lastFinalizedTime.IsZero() && candleTime.Before(pairData.lastFinalizedTime) {
 		// TODO: Implement a DLQ to send these trades for later processing
 		// instead of just discarding them. This ensures data is not lost.
-		log.Warn().
+		log.Debug().
 			Str("instrument", trade.InstrumentPair).
 			Int64("trade_id", trade.TradeID).
 			Time("trade_ts", trade.Timestamp).
@@ -181,11 +181,19 @@ func (a *Aggregator) finalizeCandles() {
 				}
 				log.Debug().Int64("first_trade", activeCandle.FirstTradeID()).
 					Int64("last_trade", activeCandle.LastTradeID()).
-					Msgf("candle_ts: %s", finalCandle.Timestamp)
+					Str("pair", pair).
+					Str("volume", activeCandle.Volume.String()).
+					Msgf("candle_ts: %s", finalCandle.Timestamp.AsTime().Format(time.RFC3339))
 				a.outputChan <- finalCandle
-				pairData.lastFinalizedTime = time.Unix(0, ts)
 			}
 			delete(pairData.activeCandles, ts)
+		}
+		if len(timestampsToFinalize) > 0 {
+			lastTs := timestampsToFinalize[len(timestampsToFinalize)-1]
+			// I store the lastFinalizedTime as last candle time.
+			// candle for 12:00:00 will get the data from 12:00:00 ~ 12:00:04.
+			// lastFinalizedTime = 12:00:05
+			pairData.lastFinalizedTime = time.Unix(0, lastTs).Add(a.interval)
 		}
 		pairData.mu.Unlock()
 	}
