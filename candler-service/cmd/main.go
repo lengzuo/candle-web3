@@ -29,7 +29,10 @@ const topic = "trades"
 
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
-
+	if os.Getenv("ENV") == "production" {
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+	}
 	interval := flag.Int("interval", 5, "The time interval in seconds for creating OHLC candles.")
 	port := flag.Int("port", 8080, "The port for the grpc server to listen on.")
 	flag.Parse()
